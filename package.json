@@ -1,0 +1,26 @@
+{
+  "name": "laterp-websocket",
+  "version": "1.0.0",
+  "description": "WebSocket server for real-time communication with Supabase database",
+  "main": "websocket.js",
+  "scripts": {
+    "start": "node websocket.js",
+    "dev": "nodemon websocket.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "websocket",
+    "supabase",
+    "realtime"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.39.7",
+    "dotenv": "^16.4.5",
+    "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  }
+}
