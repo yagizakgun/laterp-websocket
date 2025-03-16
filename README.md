@@ -9,6 +9,7 @@ A WebSocket server for real-time communication with Supabase database, designed 
 - Support for database operations (SELECT, INSERT, UPDATE, DELETE)
 - Automatic broadcasting of database changes to all connected clients
 - Error handling and logging
+- Optimized for Ubuntu VDS deployment
 
 ## Prerequisites
 
@@ -17,6 +18,8 @@ A WebSocket server for real-time communication with Supabase database, designed 
 - Supabase service role key (for database operations)
 
 ## Installation
+
+### Local Development
 
 1. Clone the repository:
    ```bash
@@ -39,7 +42,12 @@ A WebSocket server for real-time communication with Supabase database, designed 
    SUPABASE_URL=your_supabase_url_here
    SUPABASE_KEY=your_supabase_service_role_key_here
    WS_PORT=3001
+   WS_HOST=localhost
    ```
+
+### Ubuntu VDS Deployment
+
+For deploying on an Ubuntu VDS, please refer to the [Ubuntu VDS Deployment Guide](docs/ubuntu-deployment.md).
 
 ## Usage
 
@@ -55,6 +63,12 @@ For development with auto-restart on file changes:
 
 ```bash
 npm run dev
+```
+
+For production deployment with PM2:
+
+```bash
+pm2 start ecosystem.config.js
 ```
 
 ### Connecting to the WebSocket Server
@@ -169,6 +183,20 @@ The server is currently set up to monitor the following tables:
 - `vehicles`
 
 To monitor additional tables, add them to the `tablesToWatch` array in the `setupRealtimeSubscriptions` function.
+
+## Project Structure
+
+```
+laterp-websocket/
+├── websocket.js         # Main WebSocket server implementation
+├── ecosystem.config.js  # PM2 configuration
+├── .env.example         # Environment variables template
+├── package.json         # Project dependencies
+├── docs/                # Documentation
+│   └── ubuntu-deployment.md  # Ubuntu VDS deployment guide
+└── nginx/               # Nginx configuration examples
+    └── laterp-websocket.conf
+```
 
 ## License
 
