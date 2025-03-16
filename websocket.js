@@ -1,6 +1,56 @@
 const WebSocket = require('ws');
 const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
+const fs = require('fs');
+const path = require('path');
+
+// Loglama için dizin oluşturma
+const logDir = path.join(__dirname, 'logs');
+if (!fs.existsSync(logDir)) {
+    fs.mkdirSync(logDir);
+}
+
+// Log dosyası oluşturma
+const logStream = fs.createWriteStream(path.join(logDir, `websocket-${new Date().toISOString().split('T')[0]}.log`), { flags: 'a' });
+
+// Loglama fonksiyonu
+function log(level, message, data = null) {
+    const timestamp = new Date().toISOString();
+    const logMessage = `[${timestamp}] [${level.toUpperCase()}] ${message}`;
+    
+    // Konsola yazdırma
+    console[level === 'error' ? 'error' : 'log'](logMessage);
+    if (data) {
+        console[level === 'error' ? 'error' : 'log'](data);
+    }
+    
+    // Dosyaya yazdırma
+    logStream.write(logMessage + '\n');
+    if (data) {
+        logStream.write(JSON.stringify(data, null, 2) + '\n');
+    }
+}
+
+// Process hata yönetimi
+process.on('uncaughtException', (error) => {
+    log('error', 'Uncaught Exception:', error);
+    // Kritik hatalar için e-posta veya bildirim gönderme kodu buraya eklenebilir
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    log('error', 'Unhandled Rejection at:', { promise, reason });
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+    log('info', 'SIGTERM signal received. Closing WebSocket server...');
+    closeServer();
+});
+
+process.on('SIGINT', () => {
+    log('info', 'SIGINT signal received. Closing WebSocket server...');
+    closeServer();
+});
 
 // Initialize Supabase client
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -8,25 +58,81 @@ const supabaseKey = process.env.SUPABASE_KEY;
 
 // Validate environment variables
 if (!supabaseUrl || !supabaseKey) {
-    console.error('Error: SUPABASE_URL and SUPABASE_KEY environment variables must be set');
+    log('error', 'Error: SUPABASE_URL and SUPABASE_KEY environment variables must be set');
     process.exit(1);
 }
 
-console.log('Connecting to Supabase at:', supabaseUrl);
+log('info', 'Connecting to Supabase at:', supabaseUrl);
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 // Initialize WebSocket server
 const port = process.env.WS_PORT || 3001;
-const server = new WebSocket.Server({ port });
+const host = process.env.WS_HOST || '0.0.0.0'; // Default to all interfaces for VDS
+
+// WebSocket server options
+const serverOptions = {
+    port,
+    host,
+    // Ping/Pong için yapılandırma
+    clientTracking: true,
+    perMessageDeflate: {
+        zlibDeflateOptions: {
+            // Sıkıştırma seviyesi
+            level: 6,
+            // Bellek kullanımını azaltmak için
+            memLevel: 7,
+        },
+        // Sunucu tarafında sıkıştırma
+        serverNoContextTakeover: true,
+        // İstemci tarafında sıkıştırma
+        clientNoContextTakeover: true,
+        // Sadece ikili mesajları sıkıştır
+        serverMaxWindowBits: 10,
+        // Minimum sıkıştırma boyutu
+        threshold: 1024
+    }
+};
+
+const server = new WebSocket.Server(serverOptions);
 
 // Store connected clients to broadcast updates
 const clients = new Set();
+
+// Ping/Pong ile bağlantı kontrolü
+const pingInterval = setInterval(() => {
+    server.clients.forEach((client) => {
+        if (client.isAlive === false) {
+            log('info', 'Terminating inactive client connection');
+            return client.terminate();
+        }
+        
+        client.isAlive = false;
+        client.ping(() => {});
+    });
+}, 30000); // 30 saniyede bir ping gönder
+
+// Server kapatma fonksiyonu
+function closeServer() {
+    clearInterval(pingInterval);
+    
+    server.close(() => {
+        log('info', 'WebSocket server closed');
+        logStream.end();
+        process.exit(0);
+    });
+    
+    // 5 saniye içinde kapanmazsa zorla kapat
+    setTimeout(() => {
+        log('error', 'Forced shutdown after timeout');
+        process.exit(1);
+    }, 5000);
+}
 
 // Set up Supabase Realtime subscriptions
 setupRealtimeSubscriptions();
 
 function setupRealtimeSubscriptions() {
-    console.log('Setting up Supabase Realtime subscriptions...');
+    log('info', 'Setting up Supabase Realtime subscriptions...');
     
     // Dinlenecek tabloların listesi
     const tablesToWatch = [
@@ -39,7 +145,7 @@ function setupRealtimeSubscriptions() {
     
     // Her tablo için bir abonelik oluştur
     tablesToWatch.forEach(tableName => {
-        console.log(`Setting up subscription for table: ${tableName}`);
+        log('info', `Setting up subscription for table: ${tableName}`);
         
         const subscription = supabase
             .channel(`${tableName}-changes`)
@@ -48,13 +154,13 @@ function setupRealtimeSubscriptions() {
                 schema: 'public',
                 table: tableName
             }, (payload) => {
-                console.log(`Realtime change detected on ${tableName}:`, payload);
+                log('info', `Realtime change detected on ${tableName}:`, payload);
                 
                 // Broadcast the change to all connected clients
                 broadcastDatabaseChange(tableName, payload.eventType, payload.new || payload.old, payload.old);
             })
             .subscribe((status) => {
-                console.log(`Realtime subscription status for ${tableName}:`, status);
+                log('info', `Realtime subscription status for ${tableName}:`, status);
             });
     });
 }
@@ -69,7 +175,7 @@ function broadcastDatabaseChange(table, eventType, newData, oldData) {
         timestamp: new Date().toISOString()
     });
     
-    console.log(`Broadcasting ${eventType} event for ${table} to ${clients.size} clients`);
+    log('info', `Broadcasting ${eventType} event for ${table} to ${clients.size} clients`);
     
     // Send to all connected clients
     clients.forEach(client => {
@@ -79,8 +185,16 @@ function broadcastDatabaseChange(table, eventType, newData, oldData) {
     });
 }
 
-server.on('connection', (socket) => {
-    console.log('Yeni bir istemci bağlandı.');
+server.on('connection', (socket, req) => {
+    // IP adresi loglama (güvenlik için)
+    const ip = req.socket.remoteAddress;
+    log('info', `New client connected from ${ip}`);
+    
+    // Ping/Pong için hazırlık
+    socket.isAlive = true;
+    socket.on('pong', () => {
+        socket.isAlive = true;
+    });
     
     // Add to clients set
     clients.add(socket);
@@ -88,14 +202,15 @@ server.on('connection', (socket) => {
     // Send welcome message
     socket.send(JSON.stringify({ 
         status: 'connected',
-        message: 'WebSocket sunucusuna bağlandınız.'
+        message: 'WebSocket sunucusuna bağlandınız.',
+        server_time: new Date().toISOString()
     }));
 
     socket.on('message', async (message) => {
         let messageData;
         
         try {
-            console.log(`İstemciden gelen mesaj: ${message}`);
+            log('info', `Message received from client ${ip}:`, message.toString());
             
             // Parse the message
             try {
@@ -106,37 +221,44 @@ server.on('connection', (socket) => {
                     await handleDatabaseOperation(socket, messageData);
                 } else {
                     // Simple hello message
-                    console.log('Basit mesaj alındı:', messageData);
+                    log('info', 'Simple message received:', messageData);
                     socket.send(JSON.stringify({ 
                         status: 'success',
                         message: 'Mesaj alındı',
-                        operationId: messageData.operationId
+                        operationId: messageData.operationId,
+                        server_time: new Date().toISOString()
                     }));
                 }
             } catch (parseError) {
-                console.error('JSON parse error:', parseError);
+                log('error', 'JSON parse error:', parseError);
                 socket.send(JSON.stringify({ 
                     status: 'error', 
                     success: false,
                     error: 'Geçersiz JSON formatı',
-                    operationId: messageData?.operationId
+                    operationId: messageData?.operationId,
+                    server_time: new Date().toISOString()
                 }));
             }
         } catch (error) {
-            console.error('Error processing message:', error);
+            log('error', 'Error processing message:', error);
             socket.send(JSON.stringify({ 
                 status: 'error',
                 success: false,
                 error: `İşlem sırasında bir hata oluştu: ${error.message}`,
-                operationId: messageData?.operationId
+                operationId: messageData?.operationId,
+                server_time: new Date().toISOString()
             }));
         }
     });
 
-    socket.on('close', () => {
-        console.log('İstemci bağlantıyı kapattı.');
+    socket.on('close', (code, reason) => {
+        log('info', `Client ${ip} disconnected. Code: ${code}, Reason: ${reason || 'No reason provided'}`);
         // Remove from clients set
         clients.delete(socket);
+    });
+    
+    socket.on('error', (error) => {
+        log('error', `Socket error for client ${ip}:`, error);
     });
 });
 
@@ -145,40 +267,41 @@ async function handleDatabaseOperation(socket, message) {
     // data parametresini let olarak tanımlayalım, böylece değerini değiştirebiliriz
     let data = message.data;
    
-    console.log(`${operation.toUpperCase()} işlemi, tablo: ${table}`);
+    log('info', `${operation.toUpperCase()} operation on table: ${table}`);
     
     try {
         let response = {
             status: 'success',
             success: false,
-            operationId
+            operationId,
+            server_time: new Date().toISOString()
         };
 
         // Supabase her zaman public şemasını kullanır
-        console.log(`Using table: ${table} in public schema`);
+        log('info', `Using table: ${table} in public schema`);
         
         // Get the Supabase query builder for the table
         const supabaseTable = supabase.from(table);
         
         switch (operation.toLowerCase()) {
             case 'insert':
-                console.log('Insert data:', JSON.stringify(data, null, 2));
+                log('info', 'Insert data:', data);
                 
                 // Remove schema field from data if it exists to avoid conflicts
                 if (data.schema) {
-                    console.log('Removing schema field from data to avoid conflicts');
+                    log('info', 'Removing schema field from data to avoid conflicts');
                     const { schema: _, ...dataWithoutSchema } = data;
                     data = dataWithoutSchema;
                 }
                 
                 try {
-                    console.log(`Executing insert into ${table}`);
+                    log('info', `Executing insert into ${table}`);
                     const insertResult = await supabaseTable.insert(data);
                     
-                    console.log('Insert result:', JSON.stringify(insertResult, null, 2));
+                    log('info', 'Insert result:', insertResult);
                     
                     if (insertResult.error) {
-                        console.error('Insert error details:', insertResult.error);
+                        log('error', 'Insert error details:', insertResult.error);
                         throw new Error(insertResult.error.message || 'Unknown insert error');
                     }
                     
@@ -186,8 +309,8 @@ async function handleDatabaseOperation(socket, message) {
                     response.affectedRows = insertResult.data?.length || 0;
                     response.insertId = insertResult.data?.[0]?.id;
                 } catch (insertError) {
-                    console.error('Insert operation failed with error:', insertError);
-                    console.error('Full error object:', JSON.stringify(insertError, null, 2));
+                    log('error', 'Insert operation failed with error:', insertError);
+                    log('error', 'Full error object:', JSON.stringify(insertError, null, 2));
                     throw insertError;
                 }
                 break;
@@ -203,7 +326,7 @@ async function handleDatabaseOperation(socket, message) {
                     .match(data.where);
                 
                 if (updateResult.error) {
-                    console.error('Update error details:', updateResult.error);
+                    log('error', 'Update error details:', updateResult.error);
                     throw new Error(updateResult.error.message || 'Unknown update error');
                 }
                 
@@ -222,7 +345,7 @@ async function handleDatabaseOperation(socket, message) {
                     .match(data.where);
                 
                 if (deleteResult.error) {
-                    console.error('Delete error details:', deleteResult.error);
+                    log('error', 'Delete error details:', deleteResult.error);
                     throw new Error(deleteResult.error.message || 'Unknown delete error');
                 }
                 
@@ -258,7 +381,7 @@ async function handleDatabaseOperation(socket, message) {
                 const selectResult = await selectQuery;
                 
                 if (selectResult.error) {
-                    console.error('Select error details:', selectResult.error);
+                    log('error', 'Select error details:', selectResult.error);
                     throw new Error(selectResult.error.message || 'Unknown select error');
                 }
                 
@@ -270,14 +393,14 @@ async function handleDatabaseOperation(socket, message) {
                 throw new Error(`Desteklenmeyen işlem: ${operation}`);
         }
         
-        console.log(`İşlem başarılı: ${operation}, yanıt:`, response);
+        log('info', `Operation successful: ${operation}, response:`, response);
         socket.send(JSON.stringify(response));
         
     } catch (error) {
-        console.error(`${operation} işlemi sırasında hata:`, error);
+        log('error', `Error during ${operation} operation:`, error);
         
         // Log the full error object for debugging
-        console.error('Error details:', {
+        log('error', 'Error details:', {
             name: error.name,
             message: error.message,
             stack: error.stack,
@@ -290,11 +413,13 @@ async function handleDatabaseOperation(socket, message) {
             success: false,
             error: error.message || 'Unknown error occurred',
             errorCode: error.code,
-            operationId
+            operationId,
+            server_time: new Date().toISOString()
         };
         
         socket.send(JSON.stringify(errorResponse));
     }
 }
 
-console.log(`WebSocket sunucusu ${port} portunda çalışıyor...`);
+// Sunucu başlatıldığında bilgi mesajı
+log('info', `WebSocket server running on ${host}:${port}...`);
